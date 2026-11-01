@@ -70,19 +70,17 @@ npm run dev
 
 The UI's **New registration** view submits through P2. The **Bank review** view fetches decrypted records from P1 and prompts for `BANK_ADMIN_TOKEN`. Configure alternate service origins with `VITE_P1_URL` and `VITE_P2_URL` before starting Vite. Both services allow `http://localhost:5173` by default through `CORS_ORIGINS`.
 
-## Optional Qiskit BB84 simulation
+## Qiskit BB84 simulation
 
-The QKD addition is deliberately a **simulation skeleton**. It models BB84 measurements with Qiskit's local `Statevector` simulator and mixes the simulated key with the ML-KEM secret as HKDF input before deriving the AES key. It does not provide real QKD security, a quantum channel, or eavesdropping guarantees. This is only a prototype for fixed nodes; the normal end-user flow remains ML-KEM over the classical service connection.
+Both API requirements include the actual `qiskit` Python package. When `QKD_SIMULATION_ENABLED=true`, `servers/shared/qkd_simulation.py` runs a local BB84-style simulation using Qiskit's `QuantumCircuit` and `Statevector` measurement sampling. P1 and P2 reproduce the same simulated output from a shared seed and the per-handshake challenge. The simulation's 32-byte output is combined with the ML-KEM shared secret as HKDF input before deriving the AES-256-GCM key.
 
-To turn it on, generate a 32-byte seed and provision the same secret value to P1 and P2 through your local environment or secret manager:
+The local identity setup helper writes `QKD_SIMULATION_ENABLED=true` and one randomly generated, shared `QKD_SIMULATION_SEED_B64` into both ignored env files. Keep the values paired. If using existing env files, make a new seed and copy the exact same value into both `.env.p1` and `.env.p2`:
 
 ```bash
-python -c 'import base64,secrets; print(base64.b64encode(secrets.token_bytes(32)).decode())'
-export QKD_SIMULATION_ENABLED=true
-export QKD_SIMULATION_SEED_B64='<generated-base64-seed>'
+python3 -c 'import base64,secrets; print(base64.b64encode(secrets.token_bytes(32)).decode())'
 ```
 
-Set those two variables in **both** service environments before starting them. Qiskit is included in both Python requirements files. Both services expose `GET /v1/qkd/status`; P2 also rejects a handshake if P1 and P2 have different key exchange modes. Leave the feature disabled (the default) to use ML-KEM alone.
+To compare with ML-KEM only, set `QKD_SIMULATION_ENABLED=false` on **both** services. The two services must use the same mode or P2 rejects the handshake. Check their active settings with `GET /v1/qkd/status`. This is a local simulation: no qubits are sent between P1 and P2, and it provides no physical QKD or eavesdropping security.
 
 ## Troubleshooting registration
 
@@ -137,4 +135,122 @@ Stop any locally running P1/P2 processes first so their host ports are free.
 
 The provisioned Grafana dashboard is **QKD On vs Off — Registration Latency**. It compares P2's end-to-end `POST /v1/register` p50/p95 and mean duration, plus successful registration rate, grouped by the `qkd_enabled` label. Prometheus scrapes each service's `/metrics` endpoint every five seconds. The duration is end-to-end API processing time (including the P2-to-P1 round trips), not an isolated measurement of only Qiskit's simulator. A short run may not give enough samples for stable percentiles; leave Locust running for several minutes. The benchmark captures performance differences for this prototype, not evidence of a security advantage from simulated QKD.
 
+### View the benchmark results
+
+1. Start the complete local stack with `docker compose up --build` and wait until all containers are healthy.
+2. Confirm the modes: `http://localhost:8001/v1/qkd/status` and `http://localhost:8002/v1/qkd/status` should report enabled; ports `8003` and `8004` should report disabled.
+3. Open Prometheus at [`http://localhost:9090/targets`](http://localhost:9090/targets). The four `p1-qkd-on`, `p2-qkd-on`, `p1-qkd-off`, and `p2-qkd-off` targets should show **UP**. Prometheus is collecting data but does not itself provide the provisioned comparison dashboard.
+4. Open Grafana at [`http://localhost:3000`](http://localhost:3000). Sign in with `admin` / `admin` for the local-only stack. Choose **Dashboards → QuantumX → QKD On vs Off — Registration Latency**.
+5. Start Locust using the command above (from `locust/`). The default spawns five registration users per mode and one bank reader per mode. The bank readers poll immediately and then every minute; registration users continue submitting unique email addresses.
+6. Leave the load running for a few minutes. The dashboard refreshes every five seconds; p50/p95 panels use a rolling one-minute Prometheus rate window. The lines may be empty before registrations arrive or while the first window fills.
+
+The main panel reports **p50** (median) and **p95** (95% of measured requests completed within this duration). The mean panel reports the average P2 route duration, and successful registrations per second helps check that a slower latency line is still completing requests. The Prometheus expression for the p95 comparison is:
+
+```promql
+histogram_quantile(
+  0.95,
+  sum by (le, qkd_enabled) (
+    rate(bank_api_http_request_duration_seconds_bucket{
+      service="p2",
+      route="/v1/register"
+    }[1m])
+  )
+)
+```
+
+Paste it into the Prometheus query box at `http://localhost:9090/graph` to view the raw time series. The service also records P1 endpoint timings; filter with `service="p1"` to inspect handshake and decrypt/store route durations separately.
+
 The Prometheus scrape configuration is [`monitoring/prometheus.yml`](monitoring/prometheus.yml); the Grafana dashboard and provisioning are under `monitoring/grafana/`. Both APIs also expose `/metrics` for local inspection.
+
+## Deploy the application on Render
+
+The easiest Render setup is one P1 web service, one P2 web service, one Render Key Value datastore, and one static frontend. The repo's Docker Compose file is for local multi-container development; Render deploys each service as its own resource. Render supports Docker-based web services, static sites, and Redis-compatible Key Value datastores. Keep services and Key Value in the same region when possible so server-to-server and cache traffic uses Render's private network. See Render's [Docker deployment guide](https://render.com/docs/docker), [static-site guide](https://render.com/docs/static-sites), [Key Value guide](https://render.com/docs/key-value), and [private-network guide](https://render.com/docs/private-network).
+
+### 1. Push the repository to GitHub
+
+Render needs access to the Git repository. Commit and push the Dockerfiles, frontend, API code, and requirements. Do **not** commit `.env.p1` or `.env.p2`; these contain private signing keys and are ignored by Git. Create matching local identity files once if needed, then copy their values into Render's environment-variable settings rather than uploading the files to the repository.
+
+### 2. Create Render Key Value
+
+In the Render Dashboard choose **New → Key Value**. Choose a region and note the internal connection URL from the service's **Connect** page. Add that value to P1's `REDIS_URL`. The API stores short-lived handshake/session keys and registration records in this datastore. Render's free Key Value plan has no persistence, so records can disappear when the instance restarts; choose a persistent plan if the hosted demo needs registrations to survive restarts. Render Key Value is Redis-compatible and newer instances run Valkey. ([Render Key Value docs](https://render.com/docs/key-value))
+
+### 3. Deploy P1 as a Docker web service
+
+In Render choose **New → Web Service**, connect the repository, and set:
+
+- Runtime: **Docker**
+- Dockerfile path: `Dockerfile`
+- Docker build context: repository root (`.`)
+- Health check path: `/health`
+- Region: same as Key Value and P2
+- Environment variable `APP_DIR`: `servers/p1`
+
+`APP_DIR` selects the P1 app and requirements in the root Dockerfile. The Dockerfile now listens on Render's injected `PORT` value (Render's default is `10000`) and binds to `0.0.0.0`, as required by Render web services. ([Render web service docs](https://render.com/docs/web-services), [Render environment variables](https://render.com/docs/environment-variables))
+
+Add the following P1 runtime variables in Render. Use the values from the paired local env file when indicated; never put these secret values in Git or README:
+
+| Variable | Value |
+|---|---|
+| `P1_ED25519_PRIVATE_KEY_B64` | P1 private signing key from `.env.p1` |
+| `TRUSTED_CLIENTS_JSON` | P1's trusted-client JSON from `.env.p1` |
+| `BANK_ADMIN_TOKEN` | A new long random token, or the local demo token |
+| `REDIS_URL` | Render Key Value's internal connection URL |
+| `QKD_SIMULATION_ENABLED` | `true` to match the local QKD-on demo |
+| `QKD_SIMULATION_SEED_B64` | Same random seed used by P2 |
+| `CORS_ORIGINS` | Frontend's exact `https://...onrender.com` origin after creating the static site |
+
+### 4. Deploy P2 as a second Docker web service
+
+Create another web service connected to the same repository and use the same Dockerfile path, build context, region, and `/health` check. Set `APP_DIR=servers/p2`. Add:
+
+| Variable | Value |
+|---|---|
+| `P2_ED25519_PRIVATE_KEY_B64` | P2 private signing key from `.env.p2` |
+| `P1_ED25519_PUBLIC_KEY_B64` | The pinned P1 public signing key from `.env.p2` |
+| `P2_CLIENT_ID` | `p2-demo-client` (must match P1's trusted-client mapping) |
+| `P1_URL` | P1's public HTTPS URL, e.g. `https://your-p1-name.onrender.com` |
+| `QKD_SIMULATION_ENABLED` | Same mode as P1 (`true` for this setup) |
+| `QKD_SIMULATION_SEED_B64` | Exactly the same seed as P1 |
+| `CORS_ORIGINS` | The frontend's exact `https://...onrender.com` origin |
+
+P1 is a public web service in this setup because the browser-based bank review screen calls P1 directly. P2 can use P1's public HTTPS address, which also works on free web instances. If your plan supports private networking and you configure P1/P2 in the same region, you can instead set `P1_URL` to P1's internal address; Render documents that free web services can send private-network requests but cannot receive them. ([Render private networking](https://render.com/docs/private-network))
+
+### 5. Deploy the React frontend as a static site
+
+Create a **Static Site** from the same Git repository with:
+
+- Build command: `cd frontend && npm ci && npm run build`
+- Publish directory: `frontend/dist`
+- Build-time variable `VITE_P1_URL`: P1's public HTTPS URL
+- Build-time variable `VITE_P2_URL`: P2's public HTTPS URL
+
+Vite bakes `VITE_` variables into the static JavaScript during the build, so set these URLs before deploying and trigger a new build whenever they change. Once Render assigns the frontend URL, set `CORS_ORIGINS` on both APIs to that exact origin, then save and redeploy the API services. The browser needs the public HTTPS URLs; it cannot use Render's private hostnames.
+
+### 6. Verify the deployed flow
+
+After all services show **Live**, check:
+
+```text
+https://your-p1-name.onrender.com/health
+https://your-p2-name.onrender.com/health
+https://your-p1-name.onrender.com/v1/qkd/status
+https://your-p2-name.onrender.com/v1/qkd/status
+https://your-p1-name.onrender.com/docs
+https://your-p2-name.onrender.com/docs
+```
+
+Open the static frontend, submit a registration, and use the same `BANK_ADMIN_TOKEN` configured on P1 in the Bank review view. You can also test P2 directly:
+
+```bash
+curl -X POST https://your-p2-name.onrender.com/v1/register \
+  -H 'Content-Type: application/json' \
+  -d '{"registration":{"full_name":"Asha Rao","email":"asha.render@example.com","phone":"+919876543210","account_type":"savings"}}'
+```
+
+Watch the Render service logs if a deploy or handshake fails. Common deployment issues are a missing/incorrect `APP_DIR`, missing signing or QKD environment variables, P1 and P2 having different QKD modes/seeds, P2 pointing at the local `localhost:8001` instead of the deployed P1 URL, or CORS not containing the frontend origin.
+
+### Render monitoring and hosted benchmark notes
+
+The Grafana dashboard in this repository is provisioned for the **local Docker Compose** service names. Compose DNS names such as `p2-qkd-on:8000` do not resolve on Render, and Render does not deploy this compose file as a single stack. For the simplest workflow, run the QKD on/off comparison locally using Compose and Grafana. To benchmark on Render, deploy both P1/P2 pairs and isolated Key Value stores, then configure a Prometheus service to scrape each public `/metrics` URL (or use a hosted Prometheus-compatible service); deploy Grafana separately and point it at that Prometheus data source. This uses additional services and resources. Also configure the deployed frontend/backend URLs and CORS origins as described above.
+
+This is a prototype, not a production banking deployment. The sample P1 routes are public in the simplest Render layout, and the demo identities, registration schema, admin access, storage lifecycle, and cryptographic operations need a production security review before use with real customer data.

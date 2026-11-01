@@ -27,3 +27,7 @@ dist/
 .vscode/
 *.swp
 *.swo
+
+#Logs
+locust/
+monitoring/
