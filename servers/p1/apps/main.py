@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import asyncio
 import hashlib
 import json
 import os
@@ -197,7 +198,9 @@ async def complete_handshake(handshake_id: str, request: HandshakeRequest):
     input_key_material = shared_secret
     if QKD_SIMULATION_ENABLED:
         try:
-            qkd_key = bb84_simulated_key(QKD_SIMULATION_SEED, challenge)
+            # Qiskit's local BB84 simulation is CPU-bound. Keep it off the
+            # FastAPI event loop so concurrent requests can continue I/O.
+            qkd_key = await asyncio.to_thread(bb84_simulated_key, QKD_SIMULATION_SEED, challenge)
         except Exception as exc:
             raise HTTPException(503, "Qiskit BB84 simulation could not establish a key") from exc
         input_key_material += qkd_key

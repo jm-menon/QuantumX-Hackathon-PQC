@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import asyncio
 import hashlib
 import json
 import os
@@ -166,7 +167,9 @@ async def register(request: RegisterRequest):
         input_key_material = shared_secret
         if QKD_SIMULATION_ENABLED:
             try:
-                input_key_material += bb84_simulated_key(QKD_SIMULATION_SEED, challenge)
+                # The local Qiskit simulation is CPU-bound; do not block the
+                # event loop while other registration requests are in flight.
+                input_key_material += await asyncio.to_thread(bb84_simulated_key, QKD_SIMULATION_SEED, challenge)
             except Exception as exc:
                 raise HTTPException(503, "Qiskit BB84 simulation could not establish a key") from exc
         key = HKDF(algorithm=hashes.SHA256(), length=32, salt=challenge, info=b"pricewatchin-registration-aes256gcm-v2\0" + context).derive(input_key_material)

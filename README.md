@@ -102,3 +102,24 @@ curl -X POST http://localhost:8002/v1/register \
 P2 requests a one-time P1 KEM handshake, verifies P1's identity/signature, encapsulates to P1's ML-KEM public key and signs the transcript. P1 verifies P2 against its configured trust list, decapsulates, derives the same AES key and issues an opaque session ID. P2 verifies P1's key confirmation, encrypts the registration with AES-GCM (including the session ID as associated data), and sends it to P1. P1 rejects reused/expired handshakes, expired sessions, invalid ciphertexts, and duplicate email addresses.
 
 Registration fields are `full_name`, `email`, `phone`, and `account_type`; stored records expire after one year. Handshake private material expires in 120 seconds and session keys in 10 minutes. Redis should be private to the service network and configured with suitable persistence, ACLs, and encryption for the deployment.
+
+## Concurrent load test with Locust
+
+The `locust/locust.py` scenario sends concurrent, unique registrations through P2, so each simulated client exercises the full handshake and encrypted registration path. It also starts exactly one bank-side user that reads P1's registration list immediately and then once every 60 seconds. Redis uses one-time handshake/session reads and an atomic `SET NX` email index, so concurrent requests do not share handshake state and duplicate emails cannot both be accepted.
+
+Install Locust in its own environment:
+
+```bash
+cd locust
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+```
+
+Set `BANK_ADMIN_TOKEN` to the value in the root `.env.p1`, then launch Locust. For example, use 11 users to run ten registration clients plus the one fixed bank reader:
+
+```bash
+P1_URL=http://localhost:8001 P2_URL=http://localhost:8002 BANK_ADMIN_TOKEN='<value from .env.p1>' \
+  .venv/bin/locust -f locust.py --users 11 --spawn-rate 2
+```
+
+Open `http://localhost:8089` and start the run. Use a unique email for every registration; the Locust scenario generates one automatically. `--users` should be at least 1 for the bank reader; choose a higher count to add registration clients. Stop the run before using generated records as real data. This is a local demo load test, not a capacity or security certification. The Qiskit BB84 simulation is CPU work and is dispatched off each FastAPI event loop; throughput still depends on CPU, Redis, and the selected user count.
