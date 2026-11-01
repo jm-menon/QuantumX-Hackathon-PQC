@@ -25,7 +25,7 @@ from shared.qkd_simulation import bb84_simulated_key
 
 P1_URL = os.getenv("P1_URL", "http://localhost:8001").rstrip("/")
 P2_ID = os.getenv("P2_CLIENT_ID", "p2-demo-client")
-QKD_SIMULATION_ENABLED = os.getenv("QKD_SIMULATION_ENABLED", "false").lower() in {"1", "true", "yes"}
+QKD_SIMULATION_ENABLED = os.getenv("QKD_SIMULATION_ENABLED", "true").lower() in {"1", "true", "yes"}
 QKD_SIMULATION_SEED_B64 = os.getenv("QKD_SIMULATION_SEED_B64")
 if QKD_SIMULATION_ENABLED and not QKD_SIMULATION_SEED_B64:
     raise RuntimeError("QKD_SIMULATION_SEED_B64 is required when QKD_SIMULATION_ENABLED=true")

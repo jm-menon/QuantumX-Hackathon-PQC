@@ -30,7 +30,7 @@ P1_ID = os.getenv("P1_ID", "p1-bank-api")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 SESSION_TTL = int(os.getenv("SESSION_TTL_SECONDS", "600"))
 BANK_ADMIN_TOKEN = os.getenv("BANK_ADMIN_TOKEN")
-QKD_SIMULATION_ENABLED = os.getenv("QKD_SIMULATION_ENABLED", "false").lower() in {"1", "true", "yes"}
+QKD_SIMULATION_ENABLED = os.getenv("QKD_SIMULATION_ENABLED", "true").lower() in {"1", "true", "yes"}
 QKD_SIMULATION_SEED_B64 = os.getenv("QKD_SIMULATION_SEED_B64")
 if QKD_SIMULATION_ENABLED and not QKD_SIMULATION_SEED_B64:
     raise RuntimeError("QKD_SIMULATION_SEED_B64 is required when QKD_SIMULATION_ENABLED=true")
