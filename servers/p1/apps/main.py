@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 from typing import Annotated
 
 from fastapi import FastAPI, Header, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
@@ -23,6 +24,7 @@ from pqcrypto.kem import ml_kem_768
 P1_ID = os.getenv("P1_ID", "p1-bank-api")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 SESSION_TTL = int(os.getenv("SESSION_TTL_SECONDS", "600"))
+BANK_ADMIN_TOKEN = os.getenv("BANK_ADMIN_TOKEN")
 HANDSHAKE_TTL = 120
 AAD_PREFIX = b"pricewatchin-bank-registration:v1:"
 
@@ -76,6 +78,13 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="PriceWatchin P1 Bank API", version="1.0.0", lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[origin.strip() for origin in os.getenv("CORS_ORIGINS", "http://localhost:5173").split(",") if origin.strip()],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Session-ID"],
+)
 
 
 class HandshakeRequest(BaseModel):
@@ -110,7 +119,7 @@ async def identity():
 @app.post("/v1/handshakes", status_code=201)
 async def start_handshake():
     redis: Redis = app.state.redis
-    public_key, secret_key = ml_kem_768.generate_keypair()
+    public_key, secret_key = ml_kem_768.keygen()
     handshake_id = secrets.token_urlsafe(24)
     challenge = secrets.token_bytes(32)
     await redis.setex(
@@ -152,7 +161,7 @@ async def complete_handshake(handshake_id: str, request: HandshakeRequest):
         Ed25519PublicKey.from_public_bytes(trusted_key).verify(
             signature, transcript(handshake_id, request.client_id, kem_public_key) + b"\0" + challenge
         )
-        shared_secret = ml_kem_768.decrypt(b64d(state["secret_key"]), ciphertext)
+        shared_secret = ml_kem_768.decaps(b64d(state["secret_key"]), ciphertext)
     except Exception as exc:
         raise HTTPException(401, "invalid client proof or ML-KEM ciphertext") from exc
 
@@ -183,7 +192,7 @@ async def register_bank_user(payload: EncryptedRegistration, x_session_id: Annot
         ciphertext = b64d(payload.ciphertext_b64)
         if len(nonce) != 12:
             raise ValueError("AES-GCM nonce must be 12 bytes")
-        plaintext = AESGCM(b64d(session["key"])).decrypt(nonce, ciphertext, AAD_PREFIX + x_session_id.encode())
+        plaintext = AESGCM(b64d(session["key"])).decaps(nonce, ciphertext, AAD_PREFIX + x_session_id.encode())
         registration = json.loads(plaintext)
     except Exception as exc:
         raise HTTPException(400, "registration could not be authenticated or decoded") from exc
@@ -210,5 +219,25 @@ async def register_bank_user(payload: EncryptedRegistration, x_session_id: Annot
         await redis.delete(email_key)
         raise HTTPException(503, "registration storage is temporarily unavailable")
     return {"user_id": user_id, "status": "registered", "created_at": stored["created_at"]}
+
+
+@app.get("/v1/bank/registrations")
+async def bank_registrations(authorization: Annotated[str | None, Header()] = None, limit: int = 50):
+    """Demo bank review endpoint. Protect with BANK_ADMIN_TOKEN; never expose publicly as-is."""
+    if not BANK_ADMIN_TOKEN:
+        raise HTTPException(503, "BANK_ADMIN_TOKEN is not configured")
+    if authorization != f"Bearer {BANK_ADMIN_TOKEN}":
+        raise HTTPException(401, "invalid bank admin token")
+    if not 1 <= limit <= 200:
+        raise HTTPException(422, "limit must be between 1 and 200")
+    records = []
+    async for key in app.state.redis.scan_iter(match="pw:registration:*", count=100):
+        if b":email:" in key:
+            continue
+        raw = await app.state.redis.get(key)
+        if raw:
+            records.append(json.loads(raw))
+    records.sort(key=lambda record: record.get("created_at", 0), reverse=True)
+    return {"count": len(records[:limit]), "registrations": records[:limit]}
 
 

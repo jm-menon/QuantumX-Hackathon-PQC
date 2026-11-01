@@ -44,6 +44,42 @@ uvicorn apps.main:app --host 0.0.0.0 --port 8002
 
 P1 defaults to `REDIS_URL=redis://localhost:6379/0`. P2 needs all identity environment values described above. Both services expose `/docs` for the backend API.
 
+Set a bank review token before starting P1. It is used only by the demo bank records endpoint:
+
+```bash
+export BANK_ADMIN_TOKEN='choose-a-local-demo-token'
+```
+
+## API URLs
+
+With the local commands above, the API base URLs are **P1 `http://localhost:8000`** and **P2 `http://localhost:8001`**. FastAPI's interactive API docs are at `http://localhost:8000/docs` and `http://localhost:8001/docs`.
+
+| Method | URL | Purpose |
+| --- | --- | --- |
+| `GET` | `http://localhost:8000/health` | P1 health |
+| `GET` | `http://localhost:8000/v1/identity` | P1 signing identity and public key |
+| `POST` | `http://localhost:8000/v1/handshakes` | Start P1's ML-KEM handshake |
+| `POST` | `http://localhost:8000/v1/handshakes/{handshake_id}/complete` | Complete/authenticate a handshake (normally called by P2) |
+| `POST` | `http://localhost:8000/v1/registrations` | Submit AES-GCM encrypted registration (normally called by P2) |
+| `GET` | `http://localhost:8000/v1/bank/registrations?limit=50` | Bank review list; send `Authorization: Bearer $BANK_ADMIN_TOKEN` |
+| `GET` | `http://localhost:8001/health` | P2 health |
+| `GET` | `http://localhost:8001/v1/identity` | P2 signing identity and public key |
+| `POST` | `http://localhost:8001/v1/register` | Register via P2; sends JSON `{ "registration": { "full_name": "...", "email": "...", "phone": "...", "account_type": "Savings" } }` |
+
+For an end-to-end registration, call **P2** at `POST http://localhost:8001/v1/register`; P2 drives the authenticated exchange and submits encrypted data to P1. The low-level P1 handshake routes expect base64 encoded keys, signatures, and ML-KEM ciphertext; use `/docs` to inspect request schemas.
+
+## Frontend
+
+The React/Vite UI runs at `http://localhost:5173`. In another terminal:
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+The UI's **New registration** view submits through P2. The **Bank review** view fetches decrypted records from P1 and prompts for `BANK_ADMIN_TOKEN`. Configure alternate service origins with `VITE_P1_URL` and `VITE_P2_URL` before starting Vite. P1's `CORS_ORIGINS` defaults to `http://localhost:5173` for this local UI.
+
 ## Register a user through P2
 
 ```bash
