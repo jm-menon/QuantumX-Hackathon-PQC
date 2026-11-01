@@ -1,0 +1,10 @@
+apiVersion: 1
+
+providers:
+  - name: QKD Benchmark
+    orgId: 1
+    folder: QuantumX
+    type: file
+    editable: true
+    options:
+      path: /var/lib/grafana/dashboards

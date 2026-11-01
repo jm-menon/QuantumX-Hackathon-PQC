@@ -1,10 +1,7 @@
-"""Concurrent P2 registrations plus one bank-side poller.
+"""Compare concurrent registration latency with Qiskit QKD on vs off.
 
-Run from this directory with BANK_ADMIN_TOKEN set from .env.p1, for example:
-    locust -f locust.py --users 11 --spawn-rate 2
-
-Ten or more simulated client users exercise the complete P2 -> P1 flow. One
-fixed bank user reads P1's registration list immediately and then once a minute.
+Run `--users` as (2 * REGISTRATION_USERS_PER_MODE) + 2. The two extra users
+are one bank reader for each mode; both poll once per minute.
 """
 from __future__ import annotations
 
@@ -14,17 +11,17 @@ import uuid
 from locust import HttpUser, between, constant, task
 
 
-P1_URL = os.getenv("P1_URL", "http://localhost:8001").rstrip("/")
-P2_URL = os.getenv("P2_URL", "http://localhost:8002").rstrip("/")
+P1_QKD_ON_URL = os.getenv("P1_QKD_ON_URL", "http://localhost:8001").rstrip("/")
+P1_QKD_OFF_URL = os.getenv("P1_QKD_OFF_URL", "http://localhost:8003").rstrip("/")
+P2_QKD_ON_URL = os.getenv("P2_QKD_ON_URL", "http://localhost:8002").rstrip("/")
+P2_QKD_OFF_URL = os.getenv("P2_QKD_OFF_URL", "http://localhost:8004").rstrip("/")
 BANK_ADMIN_TOKEN = os.getenv("BANK_ADMIN_TOKEN", "")
+REGISTRATION_USERS_PER_MODE = max(1, int(os.getenv("REGISTRATION_USERS_PER_MODE", "5")))
 
 
-class RegistrationClient(HttpUser):
-    """Each user repeatedly creates a unique account through P2."""
-
-    host = P2_URL
+class RegistrationScenario(HttpUser):
+    abstract = True
     wait_time = between(0.5, 1.5)
-    weight = 10
 
     @task
     def register_account(self) -> None:
@@ -37,10 +34,11 @@ class RegistrationClient(HttpUser):
                 "account_type": "savings",
             }
         }
+        mode = "QKD on" if self.qkd_enabled else "QKD off"
         with self.client.post(
             "/v1/register",
             json=payload,
-            name="POST /v1/register",
+            name=f"POST /v1/register ({mode})",
             catch_response=True,
         ) as response:
             if response.status_code != 201:
@@ -57,11 +55,26 @@ class RegistrationClient(HttpUser):
             response.success()
 
 
-class BankRegistrationReader(HttpUser):
-    """One bank user polls the P1 review endpoint every 60 seconds."""
+class RegistrationQKDOn(RegistrationScenario):
+    """Traffic to the Qiskit BB84 simulation enabled pair."""
 
-    host = P1_URL
-    fixed_count = 1
+    abstract = False
+    host = P2_QKD_ON_URL
+    qkd_enabled = True
+    fixed_count = REGISTRATION_USERS_PER_MODE
+
+
+class RegistrationQKDOff(RegistrationScenario):
+    """Traffic to the ML-KEM-only pair."""
+
+    abstract = False
+    host = P2_QKD_OFF_URL
+    qkd_enabled = False
+    fixed_count = REGISTRATION_USERS_PER_MODE
+
+
+class BankReaderScenario(HttpUser):
+    abstract = True
     wait_time = constant(60)
 
     def on_start(self) -> None:
@@ -74,10 +87,11 @@ class BankRegistrationReader(HttpUser):
 
     @task
     def read_registration_list(self) -> None:
+        mode = "QKD on" if self.qkd_enabled else "QKD off"
         with self.client.get(
             "/v1/bank/registrations?limit=200",
             headers={"Authorization": f"Bearer {BANK_ADMIN_TOKEN}"},
-            name="GET /v1/bank/registrations",
+            name=f"GET /v1/bank/registrations ({mode})",
             catch_response=True,
         ) as response:
             if response.status_code != 200:
@@ -92,3 +106,17 @@ class BankRegistrationReader(HttpUser):
                 response.failure("P1 response has no registrations list")
                 return
             response.success()
+
+
+class BankReaderQKDOn(BankReaderScenario):
+    abstract = False
+    host = P1_QKD_ON_URL
+    qkd_enabled = True
+    fixed_count = 1
+
+
+class BankReaderQKDOff(BankReaderScenario):
+    abstract = False
+    host = P1_QKD_OFF_URL
+    qkd_enabled = False
+    fixed_count = 1

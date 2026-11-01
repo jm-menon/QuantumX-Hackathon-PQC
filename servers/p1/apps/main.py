@@ -26,6 +26,7 @@ from pqcrypto.kem import ml_kem_768
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from shared.qkd_simulation import bb84_simulated_key
+from shared.metrics import instrument_app, prometheus_response
 
 P1_ID = os.getenv("P1_ID", "p1-bank-api")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
@@ -108,6 +109,7 @@ app.add_middleware(
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "X-Session-ID"],
 )
+instrument_app(app, service="p1", qkd_enabled=QKD_SIMULATION_ENABLED)
 
 
 class HandshakeRequest(BaseModel):
@@ -131,6 +133,11 @@ def transcript(handshake_id: str, client_id: str, kem_public_key: bytes) -> byte
 @app.get("/health")
 async def health():
     return {"status": "ok", "service": P1_ID}
+
+
+@app.get("/metrics", include_in_schema=False)
+async def metrics():
+    return prometheus_response()
 
 
 @app.get("/v1/qkd/status")

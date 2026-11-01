@@ -105,21 +105,36 @@ Registration fields are `full_name`, `email`, `phone`, and `account_type`; store
 
 ## Concurrent load test with Locust
 
-The `locust/locust.py` scenario sends concurrent, unique registrations through P2, so each simulated client exercises the full handshake and encrypted registration path. It also starts exactly one bank-side user that reads P1's registration list immediately and then once every 60 seconds. Redis uses one-time handshake/session reads and an atomic `SET NX` email index, so concurrent requests do not share handshake state and duplicate emails cannot both be accepted.
+The `locust/locust.py` scenario sends concurrent, unique registrations through both P2 variants, so each simulated client exercises the full handshake and encrypted registration path. It starts one bank-side reader for each P1 variant; each reads its registration list immediately and then once every 60 seconds. Redis uses one-time handshake/session reads and an atomic `SET NX` email index, so concurrent requests do not share handshake state and duplicate emails cannot both be accepted.
 
-Install Locust in its own environment:
+The default run uses five registration users per mode and two bank readers, for 12 total users. The two registration classes have fixed counts, so set `--users` to `2 * REGISTRATION_USERS_PER_MODE + 2`.
+
+Install Locust in its own environment and launch the comparison against the Docker ports:
 
 ```bash
 cd locust
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
+P1_QKD_ON_URL=http://localhost:8001 P2_QKD_ON_URL=http://localhost:8002 \
+P1_QKD_OFF_URL=http://localhost:8003 P2_QKD_OFF_URL=http://localhost:8004 \
+REGISTRATION_USERS_PER_MODE=5 BANK_ADMIN_TOKEN='<value from .env.p1>' \
+  .venv/bin/locust -f locust.py --users 12 --spawn-rate 2
 ```
 
-Set `BANK_ADMIN_TOKEN` to the value in the root `.env.p1`, then launch Locust. For example, use 11 users to run ten registration clients plus the one fixed bank reader:
+Replace the token placeholder with the value from `.env.p1`. Open `http://localhost:8089` and start the run. Use `REGISTRATION_USERS_PER_MODE=10` and `--users 22` to double the clients. Stop the run before using generated records as real data. This is a local demo load test, not a capacity or security certification. The Qiskit BB84 simulation is CPU work and is dispatched off each FastAPI event loop; throughput still depends on CPU, Redis, and the selected user count.
+
+## Docker, Prometheus, and Grafana
+
+The root `docker-compose.yml` starts two isolated P1/P2 pairs: QKD simulation on at ports `8001/8002`, and QKD simulation off at `8003/8004`. They use separate Redis databases. The React frontend is available at `http://localhost:5173`, Prometheus at `http://localhost:9090`, and Grafana at `http://localhost:3000` (local demo login `admin` / `admin`). Change the Grafana password with `GRAFANA_ADMIN_PASSWORD` before sharing the stack.
+
+Make sure `.env.p1` and `.env.p2` exist and contain the paired signing identities. The identity setup helper now generates the same random QKD simulation seed for both files. If using older env files without a strong shared seed, add the same newly generated base64 encoding of 32 random bytes to both files as `QKD_SIMULATION_SEED_B64`; do not use an all-zero placeholder. Then build and start the stack:
 
 ```bash
-P1_URL=http://localhost:8001 P2_URL=http://localhost:8002 BANK_ADMIN_TOKEN='<value from .env.p1>' \
-  .venv/bin/locust -f locust.py --users 11 --spawn-rate 2
+docker compose up --build
 ```
 
-Open `http://localhost:8089` and start the run. Use a unique email for every registration; the Locust scenario generates one automatically. `--users` should be at least 1 for the bank reader; choose a higher count to add registration clients. Stop the run before using generated records as real data. This is a local demo load test, not a capacity or security certification. The Qiskit BB84 simulation is CPU work and is dispatched off each FastAPI event loop; throughput still depends on CPU, Redis, and the selected user count.
+Stop any locally running P1/P2 processes first so their host ports are free.
+
+The provisioned Grafana dashboard is **QKD On vs Off — Registration Latency**. It compares P2's end-to-end `POST /v1/register` p50/p95 and mean duration, plus successful registration rate, grouped by the `qkd_enabled` label. Prometheus scrapes each service's `/metrics` endpoint every five seconds. The duration is end-to-end API processing time (including the P2-to-P1 round trips), not an isolated measurement of only Qiskit's simulator. A short run may not give enough samples for stable percentiles; leave Locust running for several minutes. The benchmark captures performance differences for this prototype, not evidence of a security advantage from simulated QKD.
+
+The Prometheus scrape configuration is [`monitoring/prometheus.yml`](monitoring/prometheus.yml); the Grafana dashboard and provisioning are under `monitoring/grafana/`. Both APIs also expose `/metrics` for local inspection.

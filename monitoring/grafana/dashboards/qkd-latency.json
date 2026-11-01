@@ -1,0 +1,73 @@
+{
+  "uid": "qkd-latency-benchmark",
+  "title": "QKD On vs Off — Registration Latency",
+  "tags": ["quantumx", "benchmark", "qkd"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "time": { "from": "now-30m", "to": "now" },
+  "annotations": { "list": [] },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "P2 registration latency (p50 / p95)",
+      "description": "End-to-end POST /v1/register duration, measured by the P2 API. Compare qkd_enabled=true and false.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 10, "w": 16, "x": 0, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "s", "min": 0 }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.50, sum by (le, qkd_enabled) (rate(bank_api_http_request_duration_seconds_bucket{service=\"p2\", route=\"/v1/register\"}[1m])))",
+          "legendFormat": "p50 · QKD {{qkd_enabled}}",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by (le, qkd_enabled) (rate(bank_api_http_request_duration_seconds_bucket{service=\"p2\", route=\"/v1/register\"}[1m])))",
+          "legendFormat": "p95 · QKD {{qkd_enabled}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Mean P2 registration processing time",
+      "description": "Mean duration computed from the histogram sum and count for POST /v1/register.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "s", "min": 0 }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (qkd_enabled) (rate(bank_api_http_request_duration_seconds_sum{service=\"p2\", route=\"/v1/register\"}[1m])) / sum by (qkd_enabled) (rate(bank_api_http_request_duration_seconds_count{service=\"p2\", route=\"/v1/register\"}[1m]))",
+          "legendFormat": "QKD {{qkd_enabled}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Successful registrations per second",
+      "description": "P2 registration requests returning HTTP 201, grouped by QKD mode.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "reqps", "min": 0 }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (qkd_enabled) (rate(bank_api_http_requests_total{service=\"p2\", route=\"/v1/register\", status_code=\"201\"}[1m]))",
+          "legendFormat": "QKD {{qkd_enabled}}",
+          "range": true
+        }
+      ]
+    }
+  ]
+}

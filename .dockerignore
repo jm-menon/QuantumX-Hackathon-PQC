@@ -1,0 +1,12 @@
+.git
+.gitignore
+.env
+.env.*
+**/.venv
+**/venv
+**/__pycache__
+**/*.py[cod]
+**/node_modules
+frontend/dist
+monitoring/data
+locust/.venv

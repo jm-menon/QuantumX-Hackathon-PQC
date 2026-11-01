@@ -5,3 +5,4 @@ cryptography>=44,<50
 pqcrypto>=1.0,<2
 qiskit>=2,<3
 pydantic>=2.8,<3
+prometheus-client>=0.21,<1

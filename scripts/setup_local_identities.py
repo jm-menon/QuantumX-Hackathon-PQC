@@ -32,6 +32,7 @@ def main() -> None:
 
     p1_private, p1_public = key_pair()
     p2_private, p2_public = key_pair()
+    qkd_seed = encode(secrets.token_bytes(32))
     trusted_clients = json.dumps({"p2-demo-client": p2_public}, separators=(",", ":"))
     admin_token = secrets.token_urlsafe(32)
     P1_ENV.write_text(
@@ -42,6 +43,8 @@ def main() -> None:
                 f"BANK_ADMIN_TOKEN={admin_token}",
                 "REDIS_URL=redis://localhost:6379/0",
                 "CORS_ORIGINS=http://localhost:5173",
+                f"QKD_SIMULATION_SEED_B64={qkd_seed}",
+                "QKD_SIMULATION_ENABLED=true",
                 "",
             ]
         ),
@@ -55,6 +58,8 @@ def main() -> None:
                 "P2_CLIENT_ID=p2-demo-client",
                 "P1_URL=http://localhost:8001",
                 "CORS_ORIGINS=http://localhost:5173",
+                f"QKD_SIMULATION_SEED_B64={qkd_seed}",
+                "QKD_SIMULATION_ENABLED=true",
                 "",
             ]
         ),

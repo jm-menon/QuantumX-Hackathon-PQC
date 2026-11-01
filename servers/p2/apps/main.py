@@ -23,6 +23,7 @@ from pqcrypto.kem import ml_kem_768
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from shared.qkd_simulation import bb84_simulated_key
+from shared.metrics import instrument_app, prometheus_response
 
 P1_URL = os.getenv("P1_URL", "http://localhost:8001").rstrip("/")
 P2_ID = os.getenv("P2_CLIENT_ID", "p2-demo-client")
@@ -108,11 +109,17 @@ app.add_middleware(
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
 )
+instrument_app(app, service="p2", qkd_enabled=QKD_SIMULATION_ENABLED)
 
 
 @app.get("/health")
 async def health():
     return {"status": "ok", "service": "p2-client-gateway", "client_id": P2_ID}
+
+
+@app.get("/metrics", include_in_schema=False)
+async def metrics():
+    return prometheus_response()
 
 
 @app.get("/v1/qkd/status")
