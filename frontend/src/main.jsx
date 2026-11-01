@@ -3,8 +3,8 @@ import { createRoot } from 'react-dom/client';
 import { Activity, ArrowDownLeft, ArrowUpRight, BadgeCheck, Building2, Check, ChevronRight, CircleHelp, Fingerprint, KeyRound, Landmark, LockKeyhole, Menu, Plus, RefreshCw, Shield, ShieldCheck, UserRound, Users, X } from 'lucide-react';
 import './styles.css';
 
-const P1 = import.meta.env.VITE_P1_URL || 'http://localhost:8000';
-const P2 = import.meta.env.VITE_P2_URL || 'http://localhost:8001';
+const P1 = import.meta.env.VITE_P1_URL || 'http://localhost:8001';
+const P2 = import.meta.env.VITE_P2_URL || 'http://localhost:8002';
 const moneyDate = (epoch) => new Intl.DateTimeFormat('en-IN', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(epoch * 1000));
 
 function App() {

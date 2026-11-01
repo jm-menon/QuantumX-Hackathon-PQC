@@ -6,10 +6,13 @@ import hashlib
 import json
 import os
 import secrets
+import sys
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
@@ -17,13 +20,29 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from pqcrypto.kem import ml_kem_768
 
-P1_URL = os.getenv("P1_URL", "http://localhost:8000").rstrip("/")
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from shared.qkd_simulation import bb84_simulated_key
+
+P1_URL = os.getenv("P1_URL", "http://localhost:8001").rstrip("/")
 P2_ID = os.getenv("P2_CLIENT_ID", "p2-demo-client")
+QKD_SIMULATION_ENABLED = os.getenv("QKD_SIMULATION_ENABLED", "false").lower() in {"1", "true", "yes"}
+QKD_SIMULATION_SEED_B64 = os.getenv("QKD_SIMULATION_SEED_B64")
+if QKD_SIMULATION_ENABLED and not QKD_SIMULATION_SEED_B64:
+    raise RuntimeError("QKD_SIMULATION_SEED_B64 is required when QKD_SIMULATION_ENABLED=true")
+QKD_SIMULATION_SEED = base64.b64decode(QKD_SIMULATION_SEED_B64, validate=True) if QKD_SIMULATION_SEED_B64 else None
+if QKD_SIMULATION_ENABLED and len(QKD_SIMULATION_SEED) < 32:
+    raise RuntimeError("QKD_SIMULATION_SEED_B64 must decode to at least 32 bytes")
+KEY_EXCHANGE_MODE = "ML-KEM-768+BB84-QISKIT-SIMULATED" if QKD_SIMULATION_ENABLED else "ML-KEM-768"
 AAD_PREFIX = b"pricewatchin-bank-registration:v1:"
 
 
 def b64d(value: str) -> bytes:
     return base64.b64decode(value, validate=True)
+
+
+def kem_encaps(public_key: bytes) -> tuple[bytes, bytes]:
+    """Support pqcrypto 1.x and the older 0.x function names."""
+    return ml_kem_768.encaps(public_key) if hasattr(ml_kem_768, "encaps") else ml_kem_768.encrypt(public_key)
 
 
 def load_client_signer() -> Ed25519PrivateKey:
@@ -43,7 +62,7 @@ PINNED_SERVER_KEY = os.getenv("P1_ED25519_PUBLIC_KEY_B64")
 
 
 def transcript(handshake_id: str, client_id: str, kem_public_key: bytes) -> bytes:
-    return b"pricewatchin-handshake-v1\0" + handshake_id.encode() + b"\0" + client_id.encode() + b"\0" + kem_public_key
+    return b"pricewatchin-handshake-v1\0" + KEY_EXCHANGE_MODE.encode() + b"\0" + handshake_id.encode() + b"\0" + client_id.encode() + b"\0" + kem_public_key
 
 
 class Registration(BaseModel):
@@ -55,7 +74,21 @@ class Registration(BaseModel):
 
 
 class RegisterRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "examples": [
+                {
+                    "registration": {
+                        "full_name": "Asha Rao",
+                        "email": "asha@example.com",
+                        "phone": "+919876543210",
+                        "account_type": "savings",
+                    }
+                }
+            ]
+        },
+    )
     registration: Registration
 
 
@@ -67,11 +100,23 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="PriceWatchin P2 Client Gateway", version="1.0.0", lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[origin.strip() for origin in os.getenv("CORS_ORIGINS", "http://localhost:5173").split(",") if origin.strip()],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
+)
 
 
 @app.get("/health")
 async def health():
     return {"status": "ok", "service": "p2-client-gateway", "client_id": P2_ID}
+
+
+@app.get("/v1/qkd/status")
+async def qkd_status():
+    return {"enabled": QKD_SIMULATION_ENABLED, "mode": "qiskit-bb84-simulation" if QKD_SIMULATION_ENABLED else "disabled", "warning": "Simulation only; this is not physical QKD." if QKD_SIMULATION_ENABLED else None}
 
 
 @app.get("/v1/identity")
@@ -84,20 +129,27 @@ async def register(request: RegisterRequest):
     http: httpx.AsyncClient = app.state.http
     try:
         init_response = await http.post(f"{P1_URL}/v1/handshakes")
-        init_response.raise_for_status()
+        if not init_response.is_success:
+            detail = init_response.text[:300]
+            raise HTTPException(init_response.status_code, f"P1 POST /v1/handshakes failed: {detail}")
         hs = init_response.json()
+        if hs.get("key_exchange_mode") != KEY_EXCHANGE_MODE:
+            raise HTTPException(502, "P1/P2 key exchange modes differ; configure QKD simulation identically on both services")
         handshake_id = hs["handshake_id"]
         challenge = b64d(hs["challenge_b64"])
         kem_public_key = b64d(hs["kem_public_key_b64"])
         server_public = b64d(hs["server_signing_public_key_b64"])
         if PINNED_SERVER_KEY is None:
-            raise HTTPException(503, "P1_ED25519_PUBLIC_KEY_B64 must pin the P1 signing key")
+            raise HTTPException(
+                503,
+                "P1_ED25519_PUBLIC_KEY_B64 is missing from P2. Run scripts/setup_local_identities.py and restart both services with their generated env files.",
+            )
         if not secrets.compare_digest(server_public, b64d(PINNED_SERVER_KEY)):
             raise HTTPException(502, "P1 identity did not match the pinned server key")
-        server_signed = b"pricewatchin-server-handshake-v1\0" + handshake_id.encode() + b"\0" + challenge + b"\0" + kem_public_key
+        server_signed = b"pricewatchin-server-handshake-v1\0" + KEY_EXCHANGE_MODE.encode() + b"\0" + handshake_id.encode() + b"\0" + challenge + b"\0" + kem_public_key
         Ed25519PublicKey.from_public_bytes(server_public).verify(b64d(hs["server_signature_b64"]), server_signed)
 
-        ciphertext, shared_secret = ml_kem_768.encrypt(kem_public_key)
+        ciphertext, shared_secret = kem_encaps(kem_public_key)
         client_signed = transcript(handshake_id, P2_ID, kem_public_key) + b"\0" + challenge
         signature = CLIENT_SIGNER.sign(client_signed)
         complete = await http.post(
@@ -106,10 +158,18 @@ async def register(request: RegisterRequest):
                   "client_signature_b64": base64.b64encode(signature).decode(),
                   "ciphertext_b64": base64.b64encode(ciphertext).decode()},
         )
-        complete.raise_for_status()
+        if not complete.is_success:
+            detail = complete.text[:300]
+            raise HTTPException(complete.status_code, f"P1 handshake completion failed: {detail}")
         session = complete.json()
         context = transcript(handshake_id, P2_ID, kem_public_key) + ciphertext
-        key = HKDF(algorithm=hashes.SHA256(), length=32, salt=challenge, info=b"pricewatchin-registration-aes256gcm-v1\0" + context).derive(shared_secret)
+        input_key_material = shared_secret
+        if QKD_SIMULATION_ENABLED:
+            try:
+                input_key_material += bb84_simulated_key(QKD_SIMULATION_SEED, challenge)
+            except Exception as exc:
+                raise HTTPException(503, "Qiskit BB84 simulation could not establish a key") from exc
+        key = HKDF(algorithm=hashes.SHA256(), length=32, salt=challenge, info=b"pricewatchin-registration-aes256gcm-v2\0" + context).derive(input_key_material)
         proof = hashlib.sha256(b"pricewatchin-server-finished-v1\0" + context + key).digest()
         if not secrets.compare_digest(proof, b64d(session["server_proof_b64"])):
             raise HTTPException(502, "P1 key confirmation failed")
@@ -125,7 +185,11 @@ async def register(request: RegisterRequest):
             json={"nonce_b64": base64.b64encode(nonce).decode(), "ciphertext_b64": base64.b64encode(encrypted).decode()},
         )
         if result.status_code >= 400:
-            raise HTTPException(result.status_code, result.json().get("detail", "P1 rejected registration"))
+            try:
+                detail = result.json().get("detail", result.text[:300])
+            except ValueError:
+                detail = result.text[:300]
+            raise HTTPException(result.status_code, f"P1 POST /v1/registrations failed: {detail}")
         return result.json()
     except HTTPException:
         raise

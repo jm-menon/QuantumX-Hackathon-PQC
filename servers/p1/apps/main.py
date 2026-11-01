@@ -6,8 +6,10 @@ import hashlib
 import json
 import os
 import secrets
+import sys
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Annotated
 
 from fastapi import FastAPI, Header, HTTPException
@@ -21,10 +23,21 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from pqcrypto.kem import ml_kem_768
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from shared.qkd_simulation import bb84_simulated_key
+
 P1_ID = os.getenv("P1_ID", "p1-bank-api")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 SESSION_TTL = int(os.getenv("SESSION_TTL_SECONDS", "600"))
 BANK_ADMIN_TOKEN = os.getenv("BANK_ADMIN_TOKEN")
+QKD_SIMULATION_ENABLED = os.getenv("QKD_SIMULATION_ENABLED", "false").lower() in {"1", "true", "yes"}
+QKD_SIMULATION_SEED_B64 = os.getenv("QKD_SIMULATION_SEED_B64")
+if QKD_SIMULATION_ENABLED and not QKD_SIMULATION_SEED_B64:
+    raise RuntimeError("QKD_SIMULATION_SEED_B64 is required when QKD_SIMULATION_ENABLED=true")
+QKD_SIMULATION_SEED = base64.b64decode(QKD_SIMULATION_SEED_B64, validate=True) if QKD_SIMULATION_SEED_B64 else None
+if QKD_SIMULATION_ENABLED and len(QKD_SIMULATION_SEED) < 32:
+    raise RuntimeError("QKD_SIMULATION_SEED_B64 must decode to at least 32 bytes")
+KEY_EXCHANGE_MODE = "ML-KEM-768+BB84-QISKIT-SIMULATED" if QKD_SIMULATION_ENABLED else "ML-KEM-768"
 HANDSHAKE_TTL = 120
 AAD_PREFIX = b"pricewatchin-bank-registration:v1:"
 
@@ -34,6 +47,15 @@ def b64d(value: str) -> bytes:
         return base64.b64decode(value, validate=True)
     except Exception as exc:
         raise ValueError("invalid base64") from exc
+
+
+def kem_keygen() -> tuple[bytes, bytes]:
+    """Support pqcrypto 1.x and the older 0.x function names."""
+    return ml_kem_768.keygen() if hasattr(ml_kem_768, "keygen") else ml_kem_768.generate_keypair()
+
+
+def kem_decaps(secret_key: bytes, ciphertext: bytes) -> bytes:
+    return ml_kem_768.decaps(secret_key, ciphertext) if hasattr(ml_kem_768, "decaps") else ml_kem_768.decrypt(secret_key, ciphertext)
 
 
 def load_server_signer() -> Ed25519PrivateKey:
@@ -102,12 +124,17 @@ class EncryptedRegistration(BaseModel):
 
 
 def transcript(handshake_id: str, client_id: str, kem_public_key: bytes) -> bytes:
-    return b"pricewatchin-handshake-v1\0" + handshake_id.encode() + b"\0" + client_id.encode() + b"\0" + kem_public_key
+    return b"pricewatchin-handshake-v1\0" + KEY_EXCHANGE_MODE.encode() + b"\0" + handshake_id.encode() + b"\0" + client_id.encode() + b"\0" + kem_public_key
 
 
 @app.get("/health")
 async def health():
     return {"status": "ok", "service": P1_ID}
+
+
+@app.get("/v1/qkd/status")
+async def qkd_status():
+    return {"enabled": QKD_SIMULATION_ENABLED, "mode": "qiskit-bb84-simulation" if QKD_SIMULATION_ENABLED else "disabled", "warning": "Simulation only; this is not physical QKD." if QKD_SIMULATION_ENABLED else None}
 
 
 @app.get("/v1/identity")
@@ -119,18 +146,19 @@ async def identity():
 @app.post("/v1/handshakes", status_code=201)
 async def start_handshake():
     redis: Redis = app.state.redis
-    public_key, secret_key = ml_kem_768.keygen()
+    public_key, secret_key = kem_keygen()
     handshake_id = secrets.token_urlsafe(24)
     challenge = secrets.token_bytes(32)
     await redis.setex(
         f"pw:handshake:{handshake_id}", HANDSHAKE_TTL,
         json.dumps({"secret_key": base64.b64encode(secret_key).decode(), "challenge": base64.b64encode(challenge).decode(), "public_key": base64.b64encode(public_key).decode()}),
     )
-    signed = b"pricewatchin-server-handshake-v1\0" + handshake_id.encode() + b"\0" + challenge + b"\0" + public_key
+    signed = b"pricewatchin-server-handshake-v1\0" + KEY_EXCHANGE_MODE.encode() + b"\0" + handshake_id.encode() + b"\0" + challenge + b"\0" + public_key
     return {
         "handshake_id": handshake_id,
         "challenge_b64": base64.b64encode(challenge).decode(),
         "kem": "ML-KEM-768",
+        "key_exchange_mode": KEY_EXCHANGE_MODE,
         "kem_public_key_b64": base64.b64encode(public_key).decode(),
         "server_id": P1_ID,
         "server_signing_public_key_b64": base64.b64encode(SERVER_PUBLIC_RAW).decode(),
@@ -161,12 +189,19 @@ async def complete_handshake(handshake_id: str, request: HandshakeRequest):
         Ed25519PublicKey.from_public_bytes(trusted_key).verify(
             signature, transcript(handshake_id, request.client_id, kem_public_key) + b"\0" + challenge
         )
-        shared_secret = ml_kem_768.decaps(b64d(state["secret_key"]), ciphertext)
+        shared_secret = kem_decaps(b64d(state["secret_key"]), ciphertext)
     except Exception as exc:
         raise HTTPException(401, "invalid client proof or ML-KEM ciphertext") from exc
 
     context = transcript(handshake_id, request.client_id, kem_public_key) + ciphertext
-    key = HKDF(algorithm=hashes.SHA256(), length=32, salt=challenge, info=b"pricewatchin-registration-aes256gcm-v1\0" + context).derive(shared_secret)
+    input_key_material = shared_secret
+    if QKD_SIMULATION_ENABLED:
+        try:
+            qkd_key = bb84_simulated_key(QKD_SIMULATION_SEED, challenge)
+        except Exception as exc:
+            raise HTTPException(503, "Qiskit BB84 simulation could not establish a key") from exc
+        input_key_material += qkd_key
+    key = HKDF(algorithm=hashes.SHA256(), length=32, salt=challenge, info=b"pricewatchin-registration-aes256gcm-v2\0" + context).derive(input_key_material)
     session_id = secrets.token_urlsafe(32)
     await redis.setex(f"pw:session:{session_id}", SESSION_TTL, json.dumps({"client_id": request.client_id, "key": base64.b64encode(key).decode(), "created_at": int(time.time())}))
     proof = hashlib.sha256(b"pricewatchin-server-finished-v1\0" + context + key).digest()
@@ -192,7 +227,7 @@ async def register_bank_user(payload: EncryptedRegistration, x_session_id: Annot
         ciphertext = b64d(payload.ciphertext_b64)
         if len(nonce) != 12:
             raise ValueError("AES-GCM nonce must be 12 bytes")
-        plaintext = AESGCM(b64d(session["key"])).decaps(nonce, ciphertext, AAD_PREFIX + x_session_id.encode())
+        plaintext = AESGCM(b64d(session["key"])).decrypt(nonce, ciphertext, AAD_PREFIX + x_session_id.encode())
         registration = json.loads(plaintext)
     except Exception as exc:
         raise HTTPException(400, "registration could not be authenticated or decoded") from exc

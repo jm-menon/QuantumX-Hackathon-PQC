@@ -6,67 +6,57 @@ ML-KEM is a key encapsulation mechanism, not an identity system. Identity comes 
 
 ## Configure identities
 
-Generate one Ed25519 seed for P1 and one for P2 using Python:
+Generate matching local identities once from the repository root:
 
 ```bash
-python -c 'import base64; from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey; from cryptography.hazmat.primitives import serialization; k=Ed25519PrivateKey.generate(); print("P1_ED25519_PRIVATE_KEY_B64="+base64.b64encode(k.private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption())).decode()); print("P1_ED25519_PUBLIC_KEY_B64="+base64.b64encode(k.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)).decode())'
+servers/p1/.venv/bin/python scripts/setup_local_identities.py
 ```
 
-Run it again for P2, using the resulting seed as `P2_ED25519_PRIVATE_KEY_B64` and public key in P1's trusted client mapping. Example configuration (replace the values):
+This creates ignored `.env.p1` and `.env.p2` files. They contain the P1 signing key, P2 signing key, P1's trusted P2 key, P2's pin for P1, and a bank review token. The helper refuses to overwrite existing files so identity pins remain stable across restarts. If these files already exist, reuse them. If you intentionally need new identities, remove both env files first and generate a new pair.
 
-```bash
-export P1_ED25519_PRIVATE_KEY_B64='...'
-export P2_ED25519_PRIVATE_KEY_B64='...'
-export P1_ED25519_PUBLIC_KEY_B64='...'
-export TRUSTED_CLIENTS_JSON='{"p2-demo-client":"<P2 public key base64>"}'
-```
-
-P1 prints its public key at `GET /v1/identity`; compare that value with the configured P2 pin. The generated default keys are only for local experimentation: P1's key changes on restart and P2's key changes on restart unless the seeds above are configured.
+For custom deployments, P1 must receive `P1_ED25519_PRIVATE_KEY_B64` and `TRUSTED_CLIENTS_JSON`; P2 must receive `P2_ED25519_PRIVATE_KEY_B64` and `P1_ED25519_PUBLIC_KEY_B64`. P2's client ID must match a key in P1's trusted-client mapping.
 
 ## Run locally
 
-Start Redis (for example `redis-server`), then in two terminals:
+Start Redis (for example `redis-server`) and generate the identity files once. Then start the services in two terminals. Stop any already-running P1/P2 processes first so they load the environment files:
 
 ```bash
 cd servers/p1
-python -m venv .venv && . .venv/bin/activate
-pip install -r requirements.txt
-uvicorn apps.main:app --host 0.0.0.0 --port 8001
+.venv/bin/pip install -r requirements.txt
+.venv/bin/uvicorn apps.main:app --env-file ../../.env.p1 --host 0.0.0.0 --port 8001
 ```
 
 ```bash
 cd servers/p2
-python -m venv .venv && . .venv/bin/activate
-pip install -r requirements.txt
-export P1_URL=http://localhost:8001
-uvicorn apps.main:app --host 0.0.0.0 --port 8002
+.venv/bin/pip install -r requirements.txt
+.venv/bin/uvicorn apps.main:app --env-file ../../.env.p2 --host 0.0.0.0 --port 8002
 ```
 
-P1 defaults to `REDIS_URL=redis://localhost:6379/0`. P2 needs all identity environment values described above. Both services expose `/docs` for the backend API.
+P1 defaults to `REDIS_URL=redis://localhost:6379/0`. Both services expose `/docs` for the backend API. If you already started either service, stop it and restart it with the generated env file so the signing keys and pins are loaded.
 
-Set a bank review token before starting P1. It is used only by the demo bank records endpoint:
+P1 listens on port `8001`; P2 defaults to `P1_URL=http://localhost:8001` and listens on port `8002`. You can override P2's upstream with `P1_URL` if you use another P1 address.
 
-```bash
-export BANK_ADMIN_TOKEN='choose-a-local-demo-token'
-```
+The bank review token is generated in `.env.p1`. The `.env.p1` and `.env.p2` files must stay paired and unchanged between restarts.
 
 ## API URLs
 
-With the local commands above, the API base URLs are **P1 `http://localhost:8000`** and **P2 `http://localhost:8001`**. FastAPI's interactive API docs are at `http://localhost:8000/docs` and `http://localhost:8001/docs`.
+With the local commands above, the API base URLs are **P1 `http://localhost:8001`** and **P2 `http://localhost:8002`**. FastAPI's interactive API docs are at `http://localhost:8001/docs` and `http://localhost:8002/docs`.
 
 | Method | URL | Purpose |
 | --- | --- | --- |
-| `GET` | `http://localhost:8000/health` | P1 health |
-| `GET` | `http://localhost:8000/v1/identity` | P1 signing identity and public key |
-| `POST` | `http://localhost:8000/v1/handshakes` | Start P1's ML-KEM handshake |
-| `POST` | `http://localhost:8000/v1/handshakes/{handshake_id}/complete` | Complete/authenticate a handshake (normally called by P2) |
-| `POST` | `http://localhost:8000/v1/registrations` | Submit AES-GCM encrypted registration (normally called by P2) |
-| `GET` | `http://localhost:8000/v1/bank/registrations?limit=50` | Bank review list; send `Authorization: Bearer $BANK_ADMIN_TOKEN` |
-| `GET` | `http://localhost:8001/health` | P2 health |
-| `GET` | `http://localhost:8001/v1/identity` | P2 signing identity and public key |
-| `POST` | `http://localhost:8001/v1/register` | Register via P2; sends JSON `{ "registration": { "full_name": "...", "email": "...", "phone": "...", "account_type": "Savings" } }` |
+| `GET` | `http://localhost:8001/health` | P1 health |
+| `GET` | `http://localhost:8001/v1/identity` | P1 signing identity and public key |
+| `GET` | `http://localhost:8001/v1/qkd/status` | P1 QKD simulation mode |
+| `POST` | `http://localhost:8001/v1/handshakes` | Start P1's ML-KEM handshake |
+| `POST` | `http://localhost:8001/v1/handshakes/{handshake_id}/complete` | Complete/authenticate a handshake (normally called by P2) |
+| `POST` | `http://localhost:8001/v1/registrations` | Submit AES-GCM encrypted registration (normally called by P2) |
+| `GET` | `http://localhost:8001/v1/bank/registrations?limit=50` | Bank review list; send `Authorization: Bearer $BANK_ADMIN_TOKEN` |
+| `GET` | `http://localhost:8002/health` | P2 health |
+| `GET` | `http://localhost:8002/v1/identity` | P2 signing identity and public key |
+| `GET` | `http://localhost:8002/v1/qkd/status` | P2 QKD simulation mode |
+| `POST` | `http://localhost:8002/v1/register` | Register via P2; sends JSON `{ "registration": { "full_name": "...", "email": "...", "phone": "...", "account_type": "Savings" } }` |
 
-For an end-to-end registration, call **P2** at `POST http://localhost:8001/v1/register`; P2 drives the authenticated exchange and submits encrypted data to P1. The low-level P1 handshake routes expect base64 encoded keys, signatures, and ML-KEM ciphertext; use `/docs` to inspect request schemas.
+For an end-to-end registration, call **P2** at `POST http://localhost:8002/v1/register` and include the JSON body shown below; P2 drives the authenticated exchange and submits encrypted data to P1. The P1 `/complete` and `/registrations` routes are low-level protocol steps and require the returned handshake ID/session ID, signatures, encrypted body, and headers. Do not call them with an empty path segment or without those values; use P2 `/v1/register` for normal testing.
 
 ## Frontend
 
@@ -78,12 +68,33 @@ npm install
 npm run dev
 ```
 
-The UI's **New registration** view submits through P2. The **Bank review** view fetches decrypted records from P1 and prompts for `BANK_ADMIN_TOKEN`. Configure alternate service origins with `VITE_P1_URL` and `VITE_P2_URL` before starting Vite. P1's `CORS_ORIGINS` defaults to `http://localhost:5173` for this local UI.
+The UI's **New registration** view submits through P2. The **Bank review** view fetches decrypted records from P1 and prompts for `BANK_ADMIN_TOKEN`. Configure alternate service origins with `VITE_P1_URL` and `VITE_P2_URL` before starting Vite. Both services allow `http://localhost:5173` by default through `CORS_ORIGINS`.
+
+## Optional Qiskit BB84 simulation
+
+The QKD addition is deliberately a **simulation skeleton**. It models BB84 measurements with Qiskit's local `Statevector` simulator and mixes the simulated key with the ML-KEM secret as HKDF input before deriving the AES key. It does not provide real QKD security, a quantum channel, or eavesdropping guarantees. This is only a prototype for fixed nodes; the normal end-user flow remains ML-KEM over the classical service connection.
+
+To turn it on, generate a 32-byte seed and provision the same secret value to P1 and P2 through your local environment or secret manager:
+
+```bash
+python -c 'import base64,secrets; print(base64.b64encode(secrets.token_bytes(32)).decode())'
+export QKD_SIMULATION_ENABLED=true
+export QKD_SIMULATION_SEED_B64='<generated-base64-seed>'
+```
+
+Set those two variables in **both** service environments before starting them. Qiskit is included in both Python requirements files. Both services expose `GET /v1/qkd/status`; P2 also rejects a handshake if P1 and P2 have different key exchange modes. Leave the feature disabled (the default) to use ML-KEM alone.
+
+## Troubleshooting registration
+
+- **P2 says `P1_ED25519_PUBLIC_KEY_B64` is missing:** run `servers/p1/.venv/bin/python scripts/setup_local_identities.py` from the repository root once, then restart P1 with `--env-file ../../.env.p1` and P2 with `--env-file ../../.env.p2` as above.
+- **`POST /v1/register` returns 422:** send a JSON body with the `registration` object. In Swagger, click **Try it out** and keep/edit the example body. A request without a body correctly returns 422.
+- **`POST /v1/handshakes//complete` returns 404:** the handshake ID path parameter is empty. Use P2 `/v1/register`, which obtains and supplies it automatically.
+- **P1 `/v1/registrations` returns 422 for missing fields:** this low-level route requires both `X-Session-ID` and an AES-GCM payload. Use P2 `/v1/register` for a complete client flow.
 
 ## Register a user through P2
 
 ```bash
-curl -X POST http://localhost:8001/v1/register \
+curl -X POST http://localhost:8002/v1/register \
   -H 'Content-Type: application/json' \
   -d '{"registration":{"full_name":"Asha Rao","email":"asha@example.com","phone":"+919876543210","account_type":"savings"}}'
 ```
