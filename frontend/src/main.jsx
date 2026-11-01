@@ -47,21 +47,21 @@ function App() {
   const count = registrations.length;
   return <div className="app-shell">
     <aside className="sidebar">
-      <a className="brand" href="#top" onClick={() => setView('overview')}><span className="brand-mark"><Activity size={19} strokeWidth={2.5}/></span><span>pricewatchin<span className="brand-dot">.</span><small>SECURE BANKING</small></span></a>
+      <a className="brand" href="#top" onClick={() => setView('overview')}><span className="brand-mark"><Activity size={19} strokeWidth={2.5}/></span><span>FinSecure<span className="brand-dot">.</span><small>SECURE BANKING</small></span></a>
       <div className="workspace-label">WORKSPACE</div>
       <nav className="nav-list">
         <button className={`nav-item ${view === 'overview' ? 'active' : ''}`} onClick={() => setView('overview')}><Activity size={17}/> Overview</button>
         <button className={`nav-item ${view === 'register' ? 'active' : ''}`} onClick={() => setView('register')}><UserRound size={17}/> New registration</button>
         <button className={`nav-item ${view === 'bank' ? 'active' : ''}`} onClick={() => setView('bank')}><Building2 size={17}/> Bank review <span className="nav-count">{count}</span></button>
       </nav>
-      <div className="sidebar-bottom"><div className="secure-mini"><span className="secure-icon"><ShieldCheck size={17}/></span><div><strong>Quantum-safe session</strong><small>ML-KEM-768 · AES-256-GCM</small></div><Check size={15} className="green-check"/></div><div className="profile"><div className="avatar">PW</div><div><strong>PriceWatchin Demo</strong><small>Local environment</small></div><Menu size={17}/></div></div>
+      <div className="sidebar-bottom"><div className="secure-mini"><span className="secure-icon"><ShieldCheck size={17}/></span><div><strong>Quantum-safe session</strong><small>ML-KEM-768 · AES-256-GCM</small></div><Check size={15} className="green-check"/></div><div className="profile"><div className="avatar">PW</div><div><strong>FinSecure Demo</strong><small>Local environment</small></div><Menu size={17}/></div></div>
     </aside>
     <main className="main-content" id="top">
       <header className="topbar"><div className="breadcrumbs">Workspace <ChevronRight size={14}/> <span>{view === 'overview' ? 'Overview' : view === 'register' ? 'New registration' : 'Bank review'}</span></div><div className="top-actions"><span className="environment"><i/> Development</span><button className="icon-button" title="Help"><CircleHelp size={18}/></button></div></header>
       {view === 'overview' && <Overview count={count} recent={recent} go={setView} />}
       {view === 'register' && <Registration form={form} setForm={setForm} submit={submitRegistration} submitting={submitting} notice={notice} go={setView}/>}
       {view === 'bank' && <BankReview token={token} setToken={setToken} records={registrations} error={bankError} loading={loading} refresh={loadRegistrations}/>}
-      <footer className="footer"><span>PriceWatchin secure onboarding</span><span><LockKeyhole size={13}/> Protected with post-quantum key exchange</span></footer>
+      <footer className="footer"><span>FinSecure secure onboarding</span><span><LockKeyhole size={13}/> Protected with post-quantum key exchange</span></footer>
     </main>
   </div>;
 }
